@@ -1,0 +1,70 @@
+from aws_cdk import (
+    aws_ec2 as ec2,
+    aws_ecs as ecs,
+    aws_rds as rds,
+    aws_iam as iam,
+    aws_ecs_patterns as ecs_patterns,
+    core,
+)
+
+
+class GrafanaStack(core.Stack):
+    def __init__(self, scope: core.Construct, id: str, **kwargs) -> None:
+        super().__init__(scope, id, **kwargs)
+
+        # Create a VPC
+        vpc = ec2.Vpc(self, "GrafanaVpc", max_azs=2)
+
+        # Create an RDS Aurora database
+        database = rds.DatabaseInstance(
+            self,
+            "GrafanaDB",
+            engine=rds.DatabaseInstanceEngine.aurora_mysql(version=rds.AuroraMysqlEngineVersion.VER_5_7_12),
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.SMALL),
+            vpc=vpc,
+            allocated_storage=20,
+            storage_type=rds.StorageType.GP2,
+            backup_retention=core.Duration.days(7),
+            deletion_protection=False,
+            removal_policy=core.RemovalPolicy.DESTROY,
+        )
+
+        # Create a Fargate task definition
+        task_definition = ecs.FargateTaskDefinition(
+            self, "GrafanaTaskDefinition", cpu=512, memory_limit_mib=1024
+        )
+
+        # Add a container to the task definition
+        container = task_definition.add_container(
+            "GrafanaContainer",
+            image=ecs.ContainerImage.from_registry("grafana/grafana"),
+            environment={
+                "GF_DATABASE_TYPE": "mysql",
+                "GF_DATABASE_HOST": database.db_instance_endpoint_address,
+                "GF_DATABASE_NAME": "grafana",
+                "GF_DATABASE_USER": "admin",
+                "GF_DATABASE_PASSWORD": "password",
+            },
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="grafana"),
+        )
+
+        # Set up the security group for the task
+        security_group = ec2.SecurityGroup(self, "GrafanaSecurityGroup", vpc=vpc)
+        security_group.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(3000))
+
+        # Create an ECS service using Fargate
+        service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self,
+            "GrafanaService",
+            task_definition=task_definition,
+            public_load_balancer=True,
+            security_group=security_group,
+        )
+
+        # Output the URL of the Grafana service
+        core.CfnOutput(self, "GrafanaURL", value=service.load_balancer.load_balancer_dns_name)
+
+
+app = core.App()
+GrafanaStack(app, "GrafanaStack")
+app.synth()
